@@ -2,9 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>The Paradigm Chasm | Technical Violence</title>
     <style>
+        * { box-sizing: border-box; }
         body {
             margin: 0;
             overflow: hidden;
@@ -12,37 +13,45 @@
             color: #d1d1d1;
             font-family: monospace;
             user-select: none;
+            touch-action: none; /* Prevents native mobile scrolling from interfering */
         }
         #ui {
             position: absolute;
-            top: 20px;
-            left: 20px;
+            top: 10px;
+            left: 10px;
+            right: 10px;
             z-index: 100;
             display: flex;
             flex-direction: column;
-            gap: 15px;
+            gap: 10px;
+            pointer-events: none; /* Let touches pass through the empty space */
         }
         .hud {
             background: rgba(11, 19, 27, 0.85);
-            padding: 15px;
+            padding: 12px;
             border: 1px solid rgba(104, 144, 238, 0.3);
             border-radius: 4px;
-            font-size: 14px;
+            font-size: clamp(11px, 3.5vw, 14px);
             color: #58a6ff;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-            pointer-events: none;
+            white-space: pre-wrap;
+            pointer-events: auto;
         }
         .controls {
             display: flex;
-            gap: 10px;
+            flex-wrap: wrap; /* Allows buttons to stack on the Pixel 9A */
+            gap: 8px;
+            pointer-events: auto;
         }
         button {
+            flex: 1;
+            min-width: 140px;
             background: #1a1a1a;
             color: #fff;
             border: 1px solid #333;
-            padding: 10px 20px;
+            padding: 10px;
             font-family: monospace;
-            font-size: 14px;
+            font-size: clamp(11px, 3vw, 14px);
             cursor: pointer;
             transition: all 0.2s;
         }
@@ -59,21 +68,34 @@
             transform: translate(-50%, -50%);
             z-index: 100;
             display: flex;
+            flex-direction: column; /* Stack input and button on mobile */
             gap: 10px;
+            width: 90%;
+            max-width: 350px;
         }
         input[type="search"] {
             background: rgba(0,0,0,0.8);
             border: 1px solid #555;
             color: #fff;
-            padding: 15px 20px;
-            font-size: 18px;
+            padding: 15px;
+            font-size: 16px;
             font-family: monospace;
-            width: 300px;
+            width: 100%;
             outline: none;
             transition: border-color 0.2s;
+            pointer-events: auto;
         }
         input[type="search"]:focus { border-color: #58a6ff; }
-        .search-btn { background: #58a6ff; color: #000; border: none; padding: 0 20px; font-weight: bold; }
+        .search-btn {
+            background: #58a6ff; 
+            color: #000; 
+            border: none; 
+            padding: 15px; 
+            font-weight: bold; 
+            font-size: 16px; 
+            cursor: pointer;
+            pointer-events: auto;
+        }
         
         canvas {
             position: absolute;
@@ -81,6 +103,7 @@
             left: 0;
             width: 100vw;
             height: 100vh;
+            pointer-events: none; /* Let the body catch the touch events */
         }
         #canvas-2d { z-index: 1; }
         #canvas-gl { z-index: 2; }
@@ -88,7 +111,7 @@
 </head>
 <body>
     <div id="ui">
-        <div class="hud" id="stats">AWAITING IGNITION...</div>
+        <div class="hud" id="stats">INITIALIZING KERNEL...</div>
         <div class="controls">
             <button id="btn-legacy">Legacy Canvas (15k)</button>
             <button id="btn-tf" class="active">Transform Feedback (200k)</button>
