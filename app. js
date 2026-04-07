@@ -1,0 +1,324 @@
+import { assign, defMain, float, vec2, vec3, vec4, sym, mul, add, sub, div, abs, length, max, mix, normalize, program as progs, ifThen, input, output, uniform, gt, neg, $x, $y, $xy, $w, $z, clamp } from "https://esm.sh/@thi.ng/shader-ast@0.12.0";
+import { GLSLVersion, targetGLSL } from "https://esm.sh/@thi.ng/shader-ast-glsl@0.8.0";
+import { snoise3 } from "https://esm.sh/@thi.ng/shader-ast-stdlib@0.6.0";
+
+const statsEl = document.getElementById('stats');
+const btnLegacy = document.getElementById('btn-legacy');
+const btnTF = document.getElementById('btn-tf');
+const canvas2D = document.getElementById('canvas-2d');
+const canvasGL = document.getElementById('canvas-gl');
+
+let globalMouseX = 0;
+let globalMouseY = 0;
+window.addEventListener('mousemove', (e) => {
+    globalMouseX = (e.clientX / window.innerWidth) * 2 - 1;
+    globalMouseY = (1 - e.clientY / window.innerHeight) * 2 - 1;
+});
+
+// ==========================================
+// SCENARIO A: LEGACY CPU + CANVAS 2D CHOKEHOLD
+// ==========================================
+class LegacyEngine {
+    constructor() {
+        this.ctx = canvas2D.getContext('2d');
+        this.numParticles = 15000;
+        this.particles = new Float32Array(this.numParticles * 4); // [x, y, vx, vy]
+        for (let i = 0; i < this.particles.length; i += 4) {
+            this.particles[i] = (Math.random() * 2 - 1);
+            this.particles[i+1] = (Math.random() * 2 - 1);
+            this.particles[i+2] = (Math.random() - 0.5) * 0.1;
+            this.particles[i+3] = (Math.random() - 0.5) * 0.1;
+        }
+        this.active = false;
+        this.frames = 0;
+        this.lastTime = performance.now();
+    }
+
+    start() {
+        canvas2D.width = window.innerWidth;
+        canvas2D.height = window.innerHeight;
+        canvas2D.style.display = 'block';
+        this.active = true;
+        this.loop();
+    }
+
+    stop() {
+        this.active = false;
+        canvas2D.style.display = 'none';
+    }
+
+    loop() {
+        if (!this.active) return;
+        
+        const w = canvas2D.width;
+        const h = canvas2D.height;
+        this.ctx.fillStyle = 'rgba(0,0,0,1.0)';
+        this.ctx.fillRect(0, 0, w, h);
+        this.ctx.fillStyle = '#00a8ff';
+
+        // Brutal CPU Loop (AoA emulation but still running in JS single thread)
+        const dt = 0.016;
+        for (let i = 0; i < this.numParticles * 4; i += 4) {
+            let px = this.particles[i];
+            let py = this.particles[i+1];
+            let vx = this.particles[i+2];
+            let vy = this.particles[i+3];
+
+            // Fake CPU "Math" choke to simulate typical library overhead
+            let dx = globalMouseX - px;
+            let dy = globalMouseY - py;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < 0.1) dist = 0.1;
+            let forceX = (dx / dist) * 0.02 / dist;
+            let forceY = (dy / dist) * 0.02 / dist;
+
+            vx = (vx + forceX * dt) * 0.985;
+            vy = (vy + forceY * dt) * 0.985;
+            px += vx * dt;
+            py += vy * dt;
+
+            // Bounds
+            if (Math.abs(px) > 1.05) px *= -0.95;
+            if (Math.abs(py) > 1.05) py *= -0.95;
+
+            this.particles[i] = px;
+            this.particles[i+1] = py;
+            this.particles[i+2] = vx;
+            this.particles[i+3] = vy;
+
+            // Draw Choke
+            const screenX = (px + 1) * 0.5 * w;
+            const screenY = (1 - py + 1) * 0.5 * h;
+            this.ctx.fillRect(screenX, screenY, 2, 2);
+        }
+
+        this.updateStats('LEGACY CPU/CANVAS', this.numParticles);
+        requestAnimationFrame(() => this.loop());
+    }
+
+    updateStats(mode, count) {
+        this.frames++;
+        const now = performance.now();
+        if (now >= this.lastTime + 1000) {
+            statsEl.innerText = `MODE: ${mode}\nENTITIES: ${count.toLocaleString()}\nFPS: ${this.frames}\nCPU: THRESHOLD EXCEEDED`;
+            this.frames = 0;
+            this.lastTime = now;
+        }
+    }
+}
+
+// ==========================================
+// SCENARIO B: THE INNOVINNY/BRANDT PARADIGM
+// ==========================================
+class TFEngine {
+    constructor() {
+        this.gl = canvasGL.getContext('webgl2', { alpha: false, antialias: false });
+        this.numParticles = 200000;
+        this.active = false;
+        this.readIdx = 0;
+        this.frames = 0;
+        this.lastTime = performance.now();
+
+        if (!this.gl.getExtension('EXT_color_buffer_float')) console.warn("Float buffers not supported");
+
+        this.init();
+    }
+
+    init() {
+        canvasGL.width = window.innerWidth;
+        canvasGL.height = window.innerHeight;
+        this.gl.viewport(0, 0, canvasGL.width, canvasGL.height);
+
+        const data = new Float32Array(this.numParticles * 4);
+        for (let i = 0; i < data.length; i += 4) {
+            data[i] = Math.random() * 2 - 1;
+            data[i+1] = Math.random() * 2 - 1;
+            data[i+2] = (Math.random() - 0.5) * 0.1;
+            data[i+3] = (Math.random() - 0.5) * 0.1;
+        }
+
+        const { vs, fs } = this.createShaders();
+        this.program = this.createProgram(vs, fs);
+        
+        this.locs = {
+            time: this.gl.getUniformLocation(this.program, "u_time"),
+            mouse: this.gl.getUniformLocation(this.program, "u_mouse")
+        };
+
+        this.setupBuffers(data);
+        this.gl.enable(this.gl.BLEND);
+        this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE);
+    }
+
+    createShaders() {
+        const glsl = targetGLSL({ version: GLSLVersion.GLES_300 });
+
+        const a_state = input("vec4", "a_state");
+        const v_state = output("vec4", "v_state");
+        const v_color = output("vec3", "v_color");
+        const u_time = uniform("float", "u_time");
+        const u_mouse = uniform("vec2", "u_mouse");
+
+        const vsProgram = progs([
+            snoise3, a_state, v_state, v_color, u_time, u_mouse,
+            defMain(() => {
+                const pos = sym(vec2(0, 0));
+                const vel = sym(vec2(0, 0));
+                const dt = sym(float(0.016));
+                const dir = sym(vec2(0, 0));
+                const dist = sym(float(0));
+                const force = sym(vec2(0, 0));
+                const noiseCoords = sym(vec3(0, 0, 0));
+                const noise = sym(vec2(0, 0));
+                const gl_Position = output("vec4", "gl_Position");
+                const gl_PointSize = output("float", "gl_PointSize");
+
+                return [
+                    pos, vel, dt, dir, dist, force, noiseCoords, noise,
+                    assign(pos, $xy(a_state)),
+                    assign(vel, vec2($z(a_state), $w(a_state))),
+                    assign(dir, sub(u_mouse, pos)),
+                    assign(dist, length(dir)),
+                    assign(force, mul(normalize(dir), div(float(0.02), max(dist, float(0.1))))),
+                    assign(noiseCoords, vec3(mul(pos, float(1.2)), mul(u_time, float(0.15)))),
+                    assign(noise, vec2(snoise3(noiseCoords), snoise3(add(noiseCoords, float(100.0))))),
+                    assign(vel, mul(add(vel, mul(add(force, mul(noise, float(0.03))), dt)), float(0.985))),
+                    assign(pos, add(pos, mul(vel, dt))),
+                    ifThen(gt(abs($x(pos)), float(1.05)), [assign($x(pos), mul(neg($x(pos)), float(0.95)))]),
+                    ifThen(gt(abs($y(pos)), float(1.05)), [assign($y(pos), mul(neg($y(pos)), float(0.95)))]),
+                    assign(v_state, vec4(pos, vel)),
+                    assign(v_color, mix(
+                        vec3(0.0, 0.2, 0.3),
+                        vec3(0.3, 0.6, 1.0),
+                        clamp(mul(length(vel), float(15.0)), float(0.0), float(1.0))
+                    )),
+                    assign(gl_Position, vec4(pos, 0, 1)),
+                    assign(gl_PointSize, float(1.5))
+                ];
+            })
+        ]);
+
+        let vsRaw = glsl(vsProgram);
+        const vs = vsRaw.replace("#version 300 es", "#version 300 es\nprecision highp float;")
+                        .replace(/out\s+vec4\s+gl_Position\s*;/g, "")
+                        .replace(/out\s+float\s+gl_PointSize\s*;/g, "");
+
+        const fs = `#version 300 es\nprecision mediump float;\nin vec3 v_color;\nout vec4 fragColor;\nvoid main() { fragColor = vec4(v_color, 0.4); }`;
+        return { vs, fs };
+    }
+
+    createProgram(vsSource, fsSource) {
+        const gl = this.gl;
+        const compile = (type, src) => {
+            const s = gl.createShader(type);
+            gl.shaderSource(s, src);
+            gl.compileShader(s);
+            return s;
+        };
+        const program = gl.createProgram();
+        gl.attachShader(program, compile(gl.VERTEX_SHADER, vsSource));
+        gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fsSource));
+        gl.transformFeedbackVaryings(program, ["v_state"], gl.INTERLEAVED_ATTRIBS);
+        gl.linkProgram(program);
+        return program;
+    }
+
+    setupBuffers(data) {
+        const gl = this.gl;
+        this.bufA = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.bufA);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_COPY);
+
+        this.bufB = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.bufB);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_COPY);
+
+        const setupVAO = (buf) => {
+            const vao = gl.createVertexArray();
+            gl.bindVertexArray(vao);
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 16, 0);
+            return vao;
+        };
+
+        this.vaoA = setupVAO(this.bufA);
+        this.vaoB = setupVAO(this.bufB);
+        gl.bindVertexArray(null);
+    }
+
+    start() {
+        canvasGL.style.display = 'block';
+        this.active = true;
+        this.loop(performance.now());
+    }
+
+    stop() {
+        this.active = false;
+        canvasGL.style.display = 'none';
+    }
+
+    loop(t) {
+        if (!this.active) return;
+        const gl = this.gl;
+        const writeIdx = 1 - this.readIdx;
+
+        gl.useProgram(this.program);
+        gl.uniform1f(this.locs.time, t * 0.001);
+        gl.uniform2f(this.locs.mouse, globalMouseX, globalMouseY);
+
+        gl.bindVertexArray(this.readIdx === 0 ? this.vaoA : this.vaoB);
+        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, writeIdx === 0 ? this.bufA : this.bufB);
+
+        gl.enable(gl.RASTERIZER_DISCARD);
+        gl.beginTransformFeedback(gl.POINTS);
+        gl.drawArrays(gl.POINTS, 0, this.numParticles);
+        gl.endTransformFeedback();
+        gl.disable(gl.RASTERIZER_DISCARD);
+
+        gl.bindVertexArray(null);
+        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.bindVertexArray(writeIdx === 0 ? this.vaoA : this.vaoB);
+        gl.drawArrays(gl.POINTS, 0, this.numParticles);
+
+        this.readIdx = writeIdx;
+        this.updateStats('WEBGL TRANSFORM FEEDBACK', this.numParticles);
+        requestAnimationFrame((newT) => this.loop(newT));
+    }
+
+    updateStats(mode, count) {
+        this.frames++;
+        const now = performance.now();
+        if (now >= this.lastTime + 1000) {
+            statsEl.innerText = `MODE: ${mode}\nENTITIES: ${count.toLocaleString()}\nFPS: ${this.frames}\nCPU: ~0% (VRAM ISOLATED)`;
+            this.frames = 0;
+            this.lastTime = now;
+        }
+    }
+}
+
+// ==========================================
+// ORCHESTRATION
+// ==========================================
+const legacyEngine = new LegacyEngine();
+const tfEngine = new TFEngine();
+
+btnLegacy.addEventListener('click', () => {
+    btnTF.classList.remove('active');
+    btnLegacy.classList.add('active');
+    tfEngine.stop();
+    legacyEngine.start();
+});
+
+btnTF.addEventListener('click', () => {
+    btnLegacy.classList.remove('active');
+    btnTF.classList.add('active');
+    legacyEngine.stop();
+    tfEngine.start();
+});
+
+// Boot the paradigm
+tfEngine.start();
